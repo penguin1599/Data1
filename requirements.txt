@@ -1,0 +1,11 @@
+ffmpeg-python
+numpy
+opencv-python
+scenedetect[opencv]
+insightface
+onnxruntime
+torch
+torchvision
+librosa
+tqdm
+PyYAML
