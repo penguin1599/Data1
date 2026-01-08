@@ -3,9 +3,13 @@ numpy
 opencv-python
 scenedetect[opencv]
 insightface
-onnxruntime
-torch
-torchvision
+onnxruntime-gpu
 librosa
 tqdm
 PyYAML
+gdown
+# Note: torch and torchvision are installed dynamically based on GPU architecture
+# RTX 50 series: PyTorch nightly with CUDA 12.8
+# RTX 40 series: PyTorch stable with CUDA 12.4
+# RTX 30 series: PyTorch stable with CUDA 12.1
+# Older GPUs: PyTorch stable with CUDA 11.8

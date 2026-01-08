@@ -37,30 +37,29 @@ def setup_logging(output_dir):
     )
     return logging.getLogger(__name__)
 
-def init_worker(config):
+def get_models(config):
     """
-    Initialize models for each worker process.
-    This prevents re-initializing large models for every video and allows distinct CUDA contexts?
-    Note: CUDA with multiprocessing can be tricky. 'spawn' start method is usually required.
-    But for simplicity in this script, we'll try standard initialization.
-    If using CPU (defaults often), this is fine.
+    Lazy initialization of models for worker processes.
+    Only initializes if not already present in global dict.
     """
     global models
+    if models:
+        return models
+        
     print(f"Initializing worker models (Process {os.getpid()})...")
-    
+
+    # Weights directory
+    weights_dir = os.path.join(os.path.dirname(__file__), 'src', 'models', 'weights')
+
     # Initialize models
     # Device selection logic could be improved (e.g., round-robin info from main?)
     # For now, let FaceProcessor detect.
     models['face_processor'] = FaceProcessor(output_size=config['pipeline']['face_size'])
-    models['sync_filter'] = SyncFilter() # Device auto-detect usually 'cpu' unless specified
-    models['quality_filter'] = QualityFilter()
-    models['speaker_organizer'] = SpeakerOrganizer() # This might need to be shared or done at end? 
-    # SpeakerOrganizer clusters embeddings. Doing this per process means we just collect embeddings 
-    # and "organize" later? 
-    # Actually, SpeakerOrganizer.add_clip just appends to internal list? 
-    # No, we'd need to return the (embedding, path) tuples to the main process for clustering!
-    # The original pipeline added to organizer, then called .organize() at the end.
-    # In parallel, we should return the organizer data.
+    models['sync_filter'] = SyncFilter(weights_path=os.path.join(weights_dir, 'syncnet_v2.model'))
+    models['quality_filter'] = QualityFilter(weights_path=os.path.join(weights_dir, 'hyperiqa.model'))
+    models['speaker_organizer'] = SpeakerOrganizer() 
+    
+    return models
 
 def preprocess_video(video_path, steps_dirs, config):
     """
@@ -71,6 +70,7 @@ def preprocess_video(video_path, steps_dirs, config):
     base_name = os.path.basename(video_path)
     
     # Step 1: Broken File Check
+    logger.info(f"[{base_name}] Step 1/4: Checking file integrity...")
     if not clean_file(video_path):
         logger.warning(f"File broken/invalid: {video_path}")
         return []
@@ -78,15 +78,21 @@ def preprocess_video(video_path, steps_dirs, config):
     # Step 2: Resample
     resampled_path = os.path.join(steps_dirs['resampled'], base_name)
     if not os.path.exists(resampled_path):
+        logger.info(f"[{base_name}] Step 2/4: Resampling video...")
         if not resample_video(video_path, resampled_path, 
                               target_fps=config['pipeline']['target_fps'], 
                               target_sr=config['pipeline']['target_sample_rate']):
             logger.error(f"Resampling failed: {video_path}")
             return []
+    else:
+        logger.info(f"[{base_name}] Step 2/4: Resampled file exists, skipping...")
     
     # Step 3: Scene Detect
+    logger.info(f"[{base_name}] Step 3/4: Detecting scenes...")
     import ffmpeg
     scenes = find_scenes(resampled_path)
+    logger.info(f"[{base_name}] Found {len(scenes)} scenes.")
+    
     if not scenes:
         logger.info(f"No scenes found in {base_name}, assuming single scene.")
         try:
@@ -98,11 +104,12 @@ def preprocess_video(video_path, steps_dirs, config):
             return []
 
     # Step 4: Segmentation
-    # This writes files to steps_dirs['segmented']
+    logger.info(f"[{base_name}] Step 4/4: Splitting into segments...")
     video_segments = split_video(resampled_path, steps_dirs['segmented'], scenes, 
                                  min_duration=config['pipeline']['min_duration'], 
                                  max_duration=config['pipeline']['max_duration'])
     
+    logger.info(f"[{base_name}] Complete! Created {len(video_segments)} segments.")
     return video_segments
 
 def process_segment(segment_path, steps_dirs, config):
@@ -110,7 +117,7 @@ def process_segment(segment_path, steps_dirs, config):
     Phase 2: Process a single segment (Face -> Sync -> Quality).
     Returns (final_path, embedding) or None.
     """
-    global models
+    models = get_models(config)
     logger = logging.getLogger(__name__)
     seg_name = os.path.basename(segment_path)
     final_path = os.path.join(steps_dirs['final'], seg_name)
@@ -156,13 +163,32 @@ def process_segment(segment_path, steps_dirs, config):
 
     return (final_path, embedding)
 
+def predownload_models(config):
+    """
+    Pre-download all models in the main process before spawning workers.
+    This prevents race conditions where multiple workers try to download simultaneously.
+    """
+    print("Pre-downloading models (this only happens once)...")
+
+    # Download InsightFace model
+    print("  - InsightFace buffalo_l model...")
+    from insightface.app import FaceAnalysis
+    app = FaceAnalysis(providers=['CPUExecutionProvider'])
+    app.prepare(ctx_id=-1, det_size=(640, 640))
+    del app
+
+    print("  - Models ready!")
+
 def main(args):
     # Load config
     config = load_config(args.config) if args.config else load_config('config.yaml')
-    
+
     input_dir = args.input_dir
     output_dir = args.output_dir
-    
+
+    # Pre-download models before starting workers
+    predownload_models(config)
+
     # Setup directories
     steps_dirs = {
         'resampled': os.path.join(output_dir, 'step1_resampled'),
@@ -189,23 +215,20 @@ def main(args):
     # Initialize Organizer (Main Process)
     speaker_organizer = SpeakerOrganizer() # We'll feed it results from workers
 
-    # Parallel Processing
-    max_workers = args.workers if args.workers else max(1, multiprocessing.cpu_count() - 1)
-    logger.info(f"Starting processing with {max_workers} workers.")
-    
     from functools import partial
+
+    # --- PHASE 1: PRE-PROCESSING (CPU BOUND) ---
+    # High concurrency for IO/CPU tasks
+    phase1_workers = max(1, multiprocessing.cpu_count() - 1)
+    logger.info(f"Starting PHASE 1 with {phase1_workers} workers.")
     
-    with ProcessPoolExecutor(max_workers=max_workers, initializer=init_worker, initargs=(config,)) as executor:
-        
-        # --- PHASE 1: PRE-PROCESSING (Video -> Segments) ---
+    all_segments = []
+    
+    with ProcessPoolExecutor(max_workers=phase1_workers) as executor:
         logger.info("PHASE 1: Pre-processing videos to generate segments...")
         preprocess_func = partial(preprocess_video, steps_dirs=steps_dirs, config=config)
         
-        # This is usually fast (IO bound mostly), but let's run it.
-        # Note: preprocess_video returns a LIST of paths.
-        all_segments = []
-        
-        # We can run this in parallel too if multiple input videos
+        # Submit all videos
         futures_prep = [executor.submit(preprocess_func, v) for v in video_files]
         
         for future in tqdm(as_completed(futures_prep), total=len(video_files), desc="Pre-processing Videos"):
@@ -215,13 +238,22 @@ def main(args):
             except Exception as e:
                 logger.error(f"Pre-processing failed for a video: {e}")
 
-        logger.info(f"PHASE 1 Complete. Found {len(all_segments)} total segments to process.")
+    logger.info(f"PHASE 1 Complete. Found {len(all_segments)} total segments to process.")
 
-        # --- PHASE 2: PROCESSING SEGMENTS (Segment -> Final) ---
-        if not all_segments:
-            logger.info("No segments to process. Exiting.")
-            return
+    if not all_segments:
+        logger.info("No segments to process. Exiting.")
+        return
 
+    # --- PHASE 2: PROCESSING SEGMENTS (GPU BOUND) ---
+    # Low concurrency for GPU tasks to avoid OOM
+    # Default to 1 worker for safety, unless user overrides
+    phase2_workers = args.workers if args.workers else 1
+    logger.info(f"Starting PHASE 2 with {phase2_workers} workers.")
+    
+    # Check if we need to use 'spawn' for CUDA
+    # multiprocessing.set_start_method('spawn', force=True) # Usually recommended for CUDA
+    
+    with ProcessPoolExecutor(max_workers=phase2_workers) as executor:
         logger.info(f"PHASE 2: Processing {len(all_segments)} segments in parallel...")
         
         process_func = partial(process_segment, steps_dirs=steps_dirs, config=config)

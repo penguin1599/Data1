@@ -11,11 +11,17 @@ class SyncFilter:
         self.model = SyncNet().to(device)
         if os.path.exists(weights_path):
             try:
-                checkpoint = torch.load(weights_path, map_location=device)
-                self.model.load_state_dict(checkpoint['state_dict']) # specific to wav2lip format
+                checkpoint = torch.load(weights_path, map_location=device, weights_only=True)
+                # Handle both formats: direct state_dict or wrapped in 'state_dict' key
+                if isinstance(checkpoint, dict) and 'state_dict' in checkpoint:
+                    state_dict = checkpoint['state_dict']
+                else:
+                    state_dict = checkpoint
+                self.model.load_state_dict(state_dict)
                 self.model.eval()
+                print("SyncNet weights loaded successfully")
             except Exception as e:
-                print(f"Failed to load SyncNet weights: {e}")
+                print(f"Warning: Could not load SyncNet weights: {e}. Using uninitialized model.")
         else:
             print(f"SyncNet weights not found at {weights_path}")
 
