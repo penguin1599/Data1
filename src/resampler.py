@@ -3,7 +3,7 @@ import logging
 
 def resample_video(input_path, output_path, target_fps=25, target_sr=16000):
     """
-    Resample video to target FPS and audio sample rate using FFmpeg.
+    Resample video to target FPS and audio sample rate using FFmpeg (CPU).
     
     Args:
         input_path (str): Path to input video file.
@@ -17,12 +17,6 @@ def resample_video(input_path, output_path, target_fps=25, target_sr=16000):
     logger = logging.getLogger(__name__)
     
     try:
-        # Construct FFmpeg stream
-        # -r sets frame rate
-        # -ar sets audio sample rate
-        # -ac 1 sets audio to mono (common for speech processing)
-        # -y overwrites output (handled by overwrite_output() method)
-        
         job = (
             ffmpeg
             .input(input_path)

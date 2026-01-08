@@ -1,9 +1,10 @@
 import os
 import ffmpeg
+import logging
 
 def split_video(video_path, output_dir, scenes, min_duration=5.0, max_duration=10.0):
     """
-    Splits the video into segments based on scenes.
+    Splits the video into segments based on scenes using CPU encoding.
     Sub-segments large scenes into chunks of max_duration.
     
     Args:
@@ -13,6 +14,8 @@ def split_video(video_path, output_dir, scenes, min_duration=5.0, max_duration=1
         min_duration: Minimum duration to keep a clip.
         max_duration: Maximum duration of a clip.
     """
+    logger = logging.getLogger(__name__)
+    
     if not os.path.exists(output_dir):
         os.makedirs(output_dir)
     
@@ -35,14 +38,8 @@ def split_video(video_path, output_dir, scenes, min_duration=5.0, max_duration=1
             chunk_end = min(current_start + max_duration, end)
             chunk_dur = chunk_end - current_start
             
-            # If the remainder is too small (e.g. < 2s), we might drop it or append to previous?
-            # For strictness, if it's less than min_duration, we just skip this tail unless
-            # it's the ONLY chunk (which is covered by initial check).
-            # But prompt says "Split each video into 5-10 second segments."
-            # A simple greedy approach: take 10s chunks. If last chunk < 5s, maybe ignore it.
-            
+            # If the remainder is too small, skip it
             if chunk_dur < min_duration and chunk_idx > 0:
-                # If it's a tail piece shorter than min custom, skip it
                 break
             
             # Construct output filename
@@ -53,12 +50,13 @@ def split_video(video_path, output_dir, scenes, min_duration=5.0, max_duration=1
                 (
                     ffmpeg
                     .input(video_path, ss=current_start, t=chunk_dur)
-                    .output(out_path, vcodec='libx264', crf=0, preset='slow', audio_bitrate='192k', loglevel="error")
-                    .run(overwrite_output=True)
+                    .output(out_path, vcodec='libx264', crf=18, preset='fast', 
+                            acodec='aac', audio_bitrate='192k', loglevel="error")
+                    .run(overwrite_output=True, capture_stdout=True, capture_stderr=True)
                 )
                 generated_files.append(out_path)
             except ffmpeg.Error as e:
-                print(f"Error splitting {video_path} at {current_start}-{chunk_end}: {e}")
+                logger.error(f"Error splitting {video_path} at {current_start}-{chunk_end}: {e}")
             
             current_start += chunk_dur
             chunk_idx += 1

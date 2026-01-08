@@ -46,6 +46,7 @@ docker run --rm -it --gpus all ^
     -v "%OUTPUT_DIR%:/app/output" ^
     -v "%WEIGHTS_DIR%:/app/src/models/weights" ^
     -v dataprocess-pip-cache:/root/.cache/pip ^
+    -v dataprocess-torch-cache:/root/.cache/torch ^
     -v dataprocess-packages:/usr/local/lib/python3.10/dist-packages ^
     -v dataprocess-insightface:/root/.insightface ^
     %IMAGE_NAME%
